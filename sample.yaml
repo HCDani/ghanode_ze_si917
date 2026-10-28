@@ -1,0 +1,16 @@
+sample:
+  name: ghanode
+  description: SiWx917 sensor node publishing Si7021 and light readings over MQTT
+common:
+  tags:
+    - net
+    - wifi
+    - mqtt
+    - sensors
+  harness: net
+tests:
+  ghanode.siwx917:
+    platform_allow:
+      - siwx917_rb4338a
+    integration_platforms:
+      - siwx917_rb4338a

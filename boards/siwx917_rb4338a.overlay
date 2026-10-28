@@ -1,0 +1,26 @@
+/*
+ * BRD4338A on a BRD4002A mainboard.
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+/ {
+	zephyr,user {
+		/* GL5528 photoresistor: GPIO_25 to GND, 4.7 kOhm pull-up to 3.3 V */
+		io-channels = <&adc0 0>;
+		/* Powers the Si7021 on the mainboard (UULP_VBAT_GPIO_1) */
+		sensor-enable-gpios = <&uulpgpio 1 GPIO_ACTIVE_HIGH>;
+	};
+};
+
+&adc0_default {
+	group {
+		pinmux = <ADC_TOPGPIO_HP25>;
+	};
+};
+
+&adc0 {
+	channel@0 {
+		zephyr,input-positive = <SIWX91X_ADC_INPUT_HP25>;
+	};
+};

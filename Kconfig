@@ -1,0 +1,28 @@
+# SPDX-License-Identifier: Apache-2.0
+
+mainmenu "ghanode SiWx917 sensor node"
+
+menu "ghanode"
+
+config GHANODE_MQTT_BROKER_PORT
+	int "MQTT broker port"
+	default 1883
+
+config GHANODE_MQTT_TOPIC
+	string "MQTT topic readings are published to"
+	default "ghanode/sensor"
+
+config GHANODE_SAMPLE_INTERVAL_MS
+	int "Sample period in milliseconds"
+	default 20000
+
+config GHANODE_WIFI_COUNTRY
+	string "Wi-Fi regulatory country code (ISO 3166-1 alpha-2)"
+	default "DK"
+	help
+	  The NWP's default region is US, which only scans channels 1-11. Any
+	  EU country code selects the EU region and enables channels 12 and 13.
+
+endmenu
+
+source "Kconfig.zephyr"
