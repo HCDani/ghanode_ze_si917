@@ -125,18 +125,20 @@ copy secret_example.h secret.h
 
 ## Build and flash
 
-From the west workspace root:
+This repository is the application. Build it from a west workspace that has
+Zephyr **4.4.1** and the Silicon Labs HAL, passing the path to the clone:
 
 ```
-west build -p always -b siwx917_rb4338a applications/ze917 -d build
+west build -p always -b siwx917_rb4338a <path-to-this-repo> -d build
 west flash -d build
 ```
 
 `west flash` uses Simplicity Commander and writes `build/zephyr/zephyr.rps`.
 
-**NWP firmware must match Zephyr's WiSeConnect.** This Zephyr tree expects NWP
-**2.15.5** and refuses to start Wi-Fi if the major/minor version differs. A
-board flashed for the FreeRTOS project (2.16.x) needs the NWP downgraded once:
+**NWP firmware must match that Zephyr release.** Zephyr 4.4.1 expects NWP
+**2.15.5** and refuses to start Wi-Fi if the major or minor version differs. A
+board flashed for the FreeRTOS project (2.16.x) needs the image from the HAL
+blobs, which live in the west workspace:
 
 ```
 west blobs fetch hal_silabs
@@ -158,14 +160,12 @@ Logs are on the VCOM serial port (115200 8N1).
 
 ## Run on the board
 
-On a BRD4338A the firmware joined a WPA3 network, received a DHCP lease, and
-published the JSON above. A beacon loss kept sampling, rejoined (the AP had
-changed channel), and published the readings taken during the gap. A broker
-that stopped answering produced a 10 s publish timeout, a Wi-Fi restart, three
-connect timeouts, and one MCU reset, after which publishing resumed.
-
-That run still used the 30-reading queue. Keeping only the latest reading is
-in this tree and has not been flashed yet.
+On a BRD4338A the node joined a WPA3 network, received a DHCP lease, and
+published the JSON above. A beacon loss kept sampling and rejoined after the
+access point changed channel. A broker that stopped answering produced a 10 s
+publish timeout, a Wi-Fi restart, three connect timeouts, and one MCU reset,
+after which publishing resumed. The firmware on the board keeps only the latest
+unpublished reading.
 
 ## Known limitations
 
