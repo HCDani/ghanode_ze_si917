@@ -8,11 +8,11 @@ jobs:
   build-and-test:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           path: ghanode_ze_si917
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
 
@@ -24,7 +24,7 @@ jobs:
           pip install west
           west init -l ghanode_ze_si917
           west update --narrow -o=--depth=1
-          west packages pip --install
+          west packages pip --install --ignore-venv-check
           west blobs fetch hal_silabs
 
       - name: Zephyr SDK (Arm toolchain)
@@ -39,7 +39,7 @@ jobs:
       - name: Firmware for siwx917_rb4338a
         run: west build -p always -b siwx917_rb4338a ghanode_ze_si917 -d build
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         if: always()
         with:
           name: ci-output
