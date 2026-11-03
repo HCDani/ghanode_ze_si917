@@ -39,7 +39,7 @@ jobs:
       - name: Firmware for siwx917_rb4338a
         run: west build -p always -b siwx917_rb4338a ghanode_ze_si917 -d build
 
-      - uses: actions/upload-artifact@v5
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: ci-output
