@@ -4,8 +4,6 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-#include <math.h>
-
 #include <zephyr/device.h>
 #include <zephyr/devicetree.h>
 #include <zephyr/drivers/adc.h>
@@ -16,6 +14,7 @@
 #include <zephyr/logging/log.h>
 #include <zephyr/sys/sys_io.h>
 
+#include "lux.h"
 #include "sensors.h"
 
 LOG_MODULE_REGISTER(sensors, LOG_LEVEL_INF);
@@ -40,22 +39,6 @@ LOG_MODULE_REGISTER(sensors, LOG_LEVEL_INF);
 #define UULP_PAD_CTRL_OFFSET 0x1C
 #define UULP_PAD_OUT_BIT     5
 #define UULP_PAD_SELECT_BIT  6
-
-#define ADC_VREF_VOLTS 3.3f
-
-/*
- * GL5528 LDR from GPIO_25 to GND, 4.7 kOhm pull-up to the ADC reference:
- * V = VREF * R_ldr / (R_ldr + R_pullup).
- */
-#define LDR_PULLUP_OHMS 4700.0f
-/*
- * GL5528 datasheet: 10-20 kOhm at 10 lux, gamma 0.7 (10 to 100 lux). The reading
- * is used against a 2000 lux threshold; part-to-part spread moves that point to
- * 1300-3600 lux, so set R10 from a lux meter reading near 2000 lux.
- */
-#define LDR_R10_OHMS  15000.0f
-#define LDR_GAMMA     0.7f
-#define LIGHT_LUX_MAX 100000
 
 static const struct device *const si7021 = DEVICE_DT_GET(SI7021_NODE);
 static const struct i2c_dt_spec si7021_i2c = I2C_DT_SPEC_GET(SI7021_NODE);
@@ -198,26 +181,6 @@ int si7021_read(float *temperature_c, float *humidity_pct)
 	/* The datasheet formula can leave 0-100 %RH slightly near the rails. */
 	*humidity_pct = CLAMP(sensor_value_to_float(&hum), 0.0f, 100.0f);
 	return 0;
-}
-
-/* LDR power law: R = R10 * (lux / 10)^-gamma, inverted for lux. */
-static int ldr_volts_to_lux(float volts)
-{
-	/* A full-scale reading means an open LDR or total darkness. */
-	if (volts >= ADC_VREF_VOLTS * 0.999f) {
-		return 0;
-	}
-	if (volts <= 0.0f) {
-		return LIGHT_LUX_MAX;
-	}
-
-	const float r_ldr = LDR_PULLUP_OHMS * volts / (ADC_VREF_VOLTS - volts);
-	const float lux = 10.0f * powf(LDR_R10_OHMS / r_ldr, 1.0f / LDR_GAMMA);
-
-	if (lux >= (float)LIGHT_LUX_MAX) {
-		return LIGHT_LUX_MAX;
-	}
-	return (int)(lux + 0.5f);
 }
 
 int light_read(float *volts, int *lux)

@@ -6,9 +6,6 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-#include <stdio.h>
-#include <string.h>
-
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/logging/log_ctrl.h>
@@ -18,7 +15,10 @@
 #include <zephyr/sys/reboot.h>
 
 #include "app.h"
+#include "backoff.h"
 #include "mqtt_link.h"
+#include "payload.h"
+#include "recovery.h"
 #include "secrets.h"
 #include "wifi.h"
 
@@ -41,8 +41,6 @@ LOG_MODULE_REGISTER(mqtt_link, LOG_LEVEL_INF);
 #define MQTT_PUBLISH_RETRY_MS     1000
 #define MQTT_RETRY_DELAY_MIN_MS   5000
 #define MQTT_RETRY_DELAY_MAX_MS   60000
-/* Connect failures right after a Wi-Fi restart before the MCU is reset. */
-#define MQTT_FAILS_AFTER_RECOVERY 3
 /* How often the loop looks at the reading queue and the Wi-Fi state. */
 #define POLL_SLICE_MS             500
 
@@ -185,16 +183,11 @@ static int publish_reading(const struct sensor_reading *reading)
 {
 	static uint16_t next_id;
 	struct mqtt_publish_param param = {0};
-	int n;
+	const int n = payload_format(payload, sizeof(payload), sensor_id, reading);
 
-	n = snprintf(payload, sizeof(payload),
-		     "{\"Sensor ID\": \"%s\", \"temperature\":%.1f, \"humidity\": %d, "
-		     "\"light\": %d}",
-		     sensor_id, (double)reading->temperature_c,
-		     (int)(reading->humidity_pct + 0.5f), reading->light_lux);
-	if ((n <= 0) || ((size_t)n >= sizeof(payload))) {
+	if (n < 0) {
 		LOG_ERR("MQTT JSON format failed");
-		return -EMSGSIZE;
+		return n;
 	}
 
 	/* Message ID 0 is reserved. */
@@ -312,29 +305,30 @@ static int publish_until_disconnected(bool *published)
 	}
 }
 
-/*
- * Restart Wi-Fi once. If no publish gets through before the next failure,
- * reset the MCU.
- */
-static void recover_or_reset(const char *reason, bool *recovered_once)
+static void apply_recovery(enum recovery_action action, const char *reason)
 {
-	if (!*recovered_once) {
+	switch (action) {
+	case RECOVERY_RESTART_WIFI:
 		LOG_ERR("%s, restarting Wi-Fi", reason);
-		*recovered_once = true;
 		k_event_post(&net_events, NET_EVT_WIFI_DOWN);
-		return;
+		break;
+	case RECOVERY_RESET_MCU:
+		LOG_ERR("%s again after a Wi-Fi restart, resetting the MCU", reason);
+		LOG_PANIC();
+		sys_reboot(SYS_REBOOT_COLD);
+		break;
+	default:
+		break;
 	}
-	LOG_ERR("%s again after a Wi-Fi restart, resetting the MCU", reason);
-	LOG_PANIC();
-	sys_reboot(SYS_REBOOT_COLD);
 }
 
 void network_loop(void)
 {
-	bool recovered_once = false;
-	uint32_t fails_after_recovery = 0;
+	struct recovery recovery;
 	uint32_t retry_delay_ms = MQTT_RETRY_DELAY_MIN_MS;
 	int ret;
+
+	recovery_init(&recovery);
 
 	wifi_join();
 	wifi_log_diagnostics();
@@ -346,12 +340,7 @@ void network_loop(void)
 			wifi_restart();
 			k_event_clear(&net_events, NET_EVT_WIFI_DOWN);
 			wifi_log_diagnostics();
-			/*
-			 * A rejoin after a lost link is a recovery too, so connects
-			 * that keep failing afterwards still end in a reset.
-			 */
-			recovered_once = true;
-			fails_after_recovery = 0;
+			recovery_wifi_rejoined(&recovery);
 		}
 
 		ret = mqtt_connect_and_wait();
@@ -359,15 +348,10 @@ void network_loop(void)
 			bool published = false;
 
 			retry_delay_ms = MQTT_RETRY_DELAY_MIN_MS;
-			fails_after_recovery = 0;
+			recovery_connected(&recovery);
 			ret = publish_until_disconnected(&published);
-			if (published) {
-				recovered_once = false;
-			}
-			if (ret < 0) {
-				recover_or_reset("MQTT session dead without a disconnect",
-						 &recovered_once);
-			}
+			apply_recovery(recovery_session_ended(&recovery, published, ret < 0),
+				       "MQTT session dead without a disconnect");
 			continue;
 		}
 
@@ -375,13 +359,7 @@ void network_loop(void)
 			continue;
 		}
 
-		/*
-		 * A clean failure normally means the broker is down. Right after a
-		 * Wi-Fi restart it can also mean the link is wedged.
-		 */
-		if (recovered_once && (++fails_after_recovery >= MQTT_FAILS_AFTER_RECOVERY)) {
-			recover_or_reset("MQTT connect keeps failing", &recovered_once);
-		}
+		apply_recovery(recovery_connect_failed(&recovery), "MQTT connect keeps failing");
 		LOG_ERR("MQTT not connected, retrying in %u s", retry_delay_ms / 1000U);
 		/* Wakes early if Wi-Fi is lost, so the rejoin is not held up by the backoff. */
 		(void)k_event_wait(&net_events, NET_EVT_WIFI_DOWN, false, K_MSEC(retry_delay_ms));

@@ -1,0 +1,18 @@
+# Workspace for CI, or for a fresh checkout:
+#   west init -l ghanode_ze_si917 && west update
+# An existing workspace with the same SDK can build this repo without it.
+
+manifest:
+  self:
+    path: ghanode_ze_si917
+
+  remotes:
+    - name: silabs
+      url-base: https://github.com/siliconlabssoftware
+
+  projects:
+    # Simplicity SDK for Zephyr; v2026.6.0 is based on Zephyr 4.4.1.
+    - name: zephyr-silabs
+      remote: silabs
+      revision: v2026.6.0
+      import: true

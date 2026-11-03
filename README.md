@@ -135,6 +135,18 @@ west flash -d build
 
 `west flash` uses Simplicity Commander and writes `build/zephyr/zephyr.rps`.
 
+Without a workspace, `west.yml` creates one with Simplicity SDK for Zephyr
+v2026.6.0, which is based on Zephyr 4.4.1:
+
+```
+mkdir ghanode-ws && cd ghanode-ws
+git clone https://github.com/HCDani/ghanode_ze_si917
+west init -l ghanode_ze_si917
+west update
+west packages pip --install
+west blobs fetch hal_silabs
+```
+
 **NWP firmware must match that Zephyr release.** Zephyr 4.4.1 expects NWP
 **2.15.5** and refuses to start Wi-Fi if the major or minor version differs. A
 board flashed for the FreeRTOS project (2.16.x) needs the image from the HAL
@@ -147,16 +159,44 @@ commander rps load modules/hal/silabs/zephyr/blobs/wiseconnect/connectivity_firm
 
 Logs are on the VCOM serial port (115200 8N1).
 
+## Tests
+
+The logic that does not touch hardware is in its own files and has ztest
+suites that run on `native_sim` (Linux or WSL):
+
+| Suite | Covers |
+| --- | --- |
+| `payload` | The exact JSON the GHA pipeline parses, humidity rounding, buffer overflow |
+| `recovery` | The recovery ladder: when a failure restarts Wi-Fi and when it resets the MCU |
+| `reading_slot` | A new sample replaces the unpublished one |
+| `lux` | LDR voltage to lux: R10 point, full scale, clamping |
+| `backoff` | 5 s doubling to the 60 s cap |
+
+```
+west twister -T tests -p native_sim/native/64
+```
+
+GitHub Actions runs these and builds the firmware for `siwx917_rb4338a` on
+every push and pull request (`.github/workflows/ci.yml`). The CI build uses
+`secret_example.h`.
+
 ## Layout
 
 | Path | Role |
 | --- | --- |
 | `src/main.c` | Reading queue, sensor and network threads, stack reports, fatal handler |
-| `src/sensors.c` | Si7021 power gating and probe, temperature/humidity, light ADC and lux |
+| `src/sensors.c` | Si7021 power gating and probe, temperature/humidity, light ADC |
 | `src/wifi.c` | Scan, AP selection, join, DHCP, link-loss detection, diagnostics |
-| `src/mqtt_link.c` | MQTT connect, publishing, dead-session detection, recovery ladder |
+| `src/mqtt_link.c` | MQTT connect, publishing, dead-session detection, acting on the recovery ladder |
+| `src/recovery.c` | Recovery ladder decisions (no hardware) |
+| `src/payload.c` | JSON payload formatting (no hardware) |
+| `src/reading.c` | One-slot reading queue (no hardware) |
+| `src/lux.c` | LDR voltage to lux (no hardware) |
+| `src/backoff.h` | Retry delay doubling |
+| `tests/unit/` | ztest suites for the files above, on `native_sim` |
 | `boards/siwx917_rb4338a.overlay` | GPIO_25 ADC input, `SENSOR_ENABLE` pin |
 | `Kconfig`, `prj.conf` | App knobs and Zephyr configuration |
+| `west.yml` | Workspace manifest for CI or a fresh checkout |
 
 ## Run on the board
 
@@ -173,7 +213,7 @@ unpublished reading.
   stamped then, so it can be up to one sample period late. Readings that could
   not be published are dropped instead of replayed.
 * **Plain MQTT on 1883.** TLS isn't wired up.
-* **Lux is uncalibrated**; adjust `LDR_R10_OHMS` in `src/sensors.c` from a lux
+* **Lux is uncalibrated**; adjust `LDR_R10_OHMS` in `src/lux.c` from a lux
   meter reading near 2,000 lux.
 * **Humidity is rounded** to whole %RH in the payload.
 * **A failed Si7021 read skips the sample**, so a dead sensor shows up as a gap.

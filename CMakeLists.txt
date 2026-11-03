@@ -10,6 +10,10 @@ target_sources(app PRIVATE
   src/sensors.c
   src/wifi.c
   src/mqtt_link.c
+  src/reading.c
+  src/payload.c
+  src/lux.c
+  src/recovery.c
 )
 
 # secret.h (gitignored) lives next to this file.

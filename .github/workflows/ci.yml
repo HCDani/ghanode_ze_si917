@@ -1,0 +1,50 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: ghanode_ze_si917
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Host tools
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ninja-build
+
+      - name: West workspace
+        run: |
+          pip install west
+          west init -l ghanode_ze_si917
+          west update --narrow -o=--depth=1
+          west packages pip --install
+          west blobs fetch hal_silabs
+
+      - name: Zephyr SDK (Arm toolchain)
+        run: west sdk install -t arm-zephyr-eabi
+
+      - name: Unit tests on native_sim
+        run: >
+          west twister -T ghanode_ze_si917/tests -p native_sim/native/64
+          --inline-logs -v --outdir twister-out
+
+      # secret.h is gitignored, so this builds with secret_example.h.
+      - name: Firmware for siwx917_rb4338a
+        run: west build -p always -b siwx917_rb4338a ghanode_ze_si917 -d build
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ci-output
+          path: |
+            twister-out/twister.xml
+            build/zephyr/zephyr.elf
+            build/zephyr/zephyr.rps
+          if-no-files-found: ignore

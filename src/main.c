@@ -43,17 +43,12 @@ K_THREAD_DEFINE(sensor_tid, SENSOR_STACK_SIZE, sensor_thread_fn, NULL, NULL, NUL
 K_THREAD_DEFINE(net_tid, NET_STACK_SIZE, net_thread_fn, NULL, NULL, NULL, NET_PRIORITY, 0,
 		SYS_FOREVER_MS);
 
-/* Only this thread puts. A sample that is still queued has not been published,
- * so it is dropped in favour of the new one.
- */
+/* Only the sensor thread puts. */
 static void enqueue_reading(const struct sensor_reading *reading)
 {
-	struct sensor_reading discarded;
-
-	if (k_msgq_get(&reading_queue, &discarded, K_NO_WAIT) == 0) {
+	if (reading_slot_put(&reading_queue, reading)) {
 		LOG_INF("Dropped an unpublished reading");
 	}
-	(void)k_msgq_put(&reading_queue, reading, K_NO_WAIT);
 }
 
 static void log_stack_high_water(void)

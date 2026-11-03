@@ -19,6 +19,7 @@
 #include <zephyr/net/wifi_mgmt.h>
 
 #include "app.h"
+#include "backoff.h"
 #include "secrets.h"
 #include "wifi.h"
 
