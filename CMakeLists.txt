@@ -14,6 +14,8 @@ target_sources(app PRIVATE
   src/payload.c
   src/lux.c
   src/recovery.c
+  src/sntp_sync.c
+  src/timesync.c
 )
 
 # secret.h (gitignored) lives next to this file.

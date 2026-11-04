@@ -20,13 +20,14 @@
 #include "payload.h"
 #include "recovery.h"
 #include "secrets.h"
+#include "sntp_sync.h"
 #include "wifi.h"
 
 LOG_MODULE_REGISTER(mqtt_link, LOG_LEVEL_INF);
 
 /* QoS 1, so a reading is only treated as delivered once the broker acknowledges
- * it. One that never is acknowledged is dropped: replaying it later would stamp
- * it with the reconnect time.
+ * it. One that is not is sent again in the next session, so a subscriber can
+ * see a reading twice, with the same Sensor ID and timestamp.
  */
 #define PUBLISH_QOS MQTT_QOS_1_AT_LEAST_ONCE
 
@@ -48,6 +49,10 @@ static uint8_t rx_buf[MQTT_BUF_LEN];
 static uint8_t tx_buf[MQTT_BUF_LEN];
 static char payload[MQTT_JSON_MAX_LEN];
 static char sensor_id[SENSOR_ID_LEN] = "000000000000";
+
+/* Taken from the queue but not yet acknowledged. Kept across sessions. */
+static struct sensor_reading pending;
+static bool has_pending;
 
 static struct mqtt_client client;
 static struct net_sockaddr_storage broker;
@@ -179,11 +184,24 @@ static int mqtt_connect_and_wait(void)
 	return 0;
 }
 
+/*
+ * Without a time sync a subscriber can only time a reading on arrival, so only
+ * a fresh one may go out. An older one would get the wrong time.
+ */
+static bool too_old_to_send_unstamped(const struct sensor_reading *reading)
+{
+	return !sntp_synced() &&
+	       ((k_uptime_get() - reading->uptime_ms) > CONFIG_GHANODE_SAMPLE_INTERVAL_MS);
+}
+
 static int publish_reading(const struct sensor_reading *reading)
 {
 	static uint16_t next_id;
 	struct mqtt_publish_param param = {0};
-	const int n = payload_format(payload, sizeof(payload), sensor_id, reading);
+	int64_t epoch_ms;
+	const bool stamped = sntp_uptime_to_epoch_ms(reading->uptime_ms, &epoch_ms);
+	const int n = payload_format(payload, sizeof(payload), sensor_id, reading,
+				     stamped ? &epoch_ms : NULL);
 
 	if (n < 0) {
 		LOG_ERR("MQTT JSON format failed");
@@ -210,18 +228,6 @@ static int publish_reading(const struct sensor_reading *reading)
 	return ret;
 }
 
-/* Drops a reading the broker never acknowledged. Replaying it after the
- * reconnect would give it the wrong time.
- */
-static int drop_pending(bool *has_pending, int ret)
-{
-	if (*has_pending) {
-		LOG_INF("Dropped an unpublished reading");
-		*has_pending = false;
-	}
-	return ret;
-}
-
 /*
  * Publishes until the session ends. Returns 0 when the broker or Wi-Fi reports
  * a disconnect, and -EPIPE when the session is dead without any disconnect
@@ -229,8 +235,6 @@ static int drop_pending(bool *has_pending, int ret)
  */
 static int publish_until_disconnected(bool *published)
 {
-	struct sensor_reading pending;
-	bool has_pending = false;
 	bool in_flight = false;
 	int64_t ack_deadline = 0;
 	int64_t retry_at = 0;
@@ -240,14 +244,25 @@ static int publish_until_disconnected(bool *published)
 	while (true) {
 		if (wifi_down()) {
 			(void)mqtt_abort(&client);
-			return drop_pending(&has_pending, 0);
+			return 0;
 		}
 		if (!mqtt_connected) {
-			return drop_pending(&has_pending, 0);
+			return 0;
+		}
+
+		if (!in_flight) {
+			sntp_sync_if_due();
 		}
 
 		if (!has_pending && (k_msgq_get(&reading_queue, &pending, K_NO_WAIT) == 0)) {
 			has_pending = true;
+		}
+
+		if (has_pending && !in_flight && too_old_to_send_unstamped(&pending)) {
+			LOG_INF("No SNTP time, dropped a reading taken %lld s ago",
+				(k_uptime_get() - pending.uptime_ms) / 1000);
+			has_pending = false;
+			continue;
 		}
 
 		if (has_pending && !in_flight && (k_uptime_get() >= retry_at)) {
@@ -255,16 +270,16 @@ static int publish_until_disconnected(bool *published)
 			if (ret == 0) {
 				in_flight = true;
 				ack_deadline = k_uptime_get() + MQTT_PUBLISH_WAIT_MS;
-			} else if (ret == -EMSGSIZE) {
+			} else if ((ret == -EMSGSIZE) || (ret == -EINVAL)) {
 				has_pending = false;
 			} else if (!mqtt_connected) {
-				return drop_pending(&has_pending, 0);
+				return 0;
 			} else {
 				rejections++;
 				LOG_ERR("MQTT publish rejected: %d (%u in a row)", ret, rejections);
 				if (rejections >= MQTT_PUBLISH_REJECT_LIMIT) {
 					(void)mqtt_abort(&client);
-					return drop_pending(&has_pending, -EPIPE);
+					return -EPIPE;
 				}
 				retry_at = k_uptime_get() + MQTT_PUBLISH_RETRY_MS;
 			}
@@ -274,7 +289,7 @@ static int publish_until_disconnected(bool *published)
 			ret = mqtt_input(&client);
 			if (ret < 0) {
 				LOG_ERR("MQTT input failed: %d", ret);
-				return drop_pending(&has_pending, 0);
+				return 0;
 			}
 		}
 
@@ -282,14 +297,14 @@ static int publish_until_disconnected(bool *published)
 		if ((ret < 0) && (ret != -EAGAIN)) {
 			LOG_ERR("MQTT keep-alive failed: %d", ret);
 			(void)mqtt_abort(&client);
-			return drop_pending(&has_pending, 0);
+			return 0;
 		}
 
 		/* mqtt_live() sends a PINGREQ each keep-alive period; one unanswered is tolerated. */
 		if (client.unacked_ping > 1) {
 			LOG_ERR("No PINGRESP for a whole keep-alive period");
 			(void)mqtt_abort(&client);
-			return drop_pending(&has_pending, -EPIPE);
+			return -EPIPE;
 		}
 
 		if (in_flight && puback_received) {
@@ -300,7 +315,7 @@ static int publish_until_disconnected(bool *published)
 		} else if (in_flight && (k_uptime_get() >= ack_deadline)) {
 			LOG_ERR("MQTT publish not acknowledged in %u ms", MQTT_PUBLISH_WAIT_MS);
 			(void)mqtt_abort(&client);
-			return drop_pending(&has_pending, -EPIPE);
+			return -EPIPE;
 		}
 	}
 }
@@ -342,6 +357,8 @@ void network_loop(void)
 			wifi_log_diagnostics();
 			recovery_wifi_rejoined(&recovery);
 		}
+
+		sntp_sync_if_due();
 
 		ret = mqtt_connect_and_wait();
 		if (ret == 0) {

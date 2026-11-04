@@ -6,36 +6,62 @@
 
 #include "reading.h"
 
-K_MSGQ_DEFINE(slot, sizeof(struct sensor_reading), 1, 4);
+#define QUEUE_LEN 3
 
-static void purge_slot(void *fixture)
+K_MSGQ_DEFINE(queue, sizeof(struct sensor_reading), QUEUE_LEN, 8);
+
+static void purge_queue(void *fixture)
 {
 	ARG_UNUSED(fixture);
-	k_msgq_purge(&slot);
+	k_msgq_purge(&queue);
 }
 
-ZTEST_SUITE(reading_slot, NULL, NULL, purge_slot, NULL, NULL);
-
-ZTEST(reading_slot, test_put_into_empty_slot_drops_nothing)
+static void put_n(int n)
 {
-	const struct sensor_reading r = {.temperature_c = 21.0f};
+	for (int i = 0; i < n; i++) {
+		const struct sensor_reading r = {.uptime_ms = i};
+
+		(void)reading_queue_put(&queue, &r);
+	}
+}
+
+ZTEST_SUITE(reading_queue, NULL, NULL, purge_queue, NULL, NULL);
+
+ZTEST(reading_queue, test_put_into_empty_queue_drops_nothing)
+{
+	const struct sensor_reading r = {.uptime_ms = 20000, .temperature_c = 21.0f};
 	struct sensor_reading out;
 
-	zassert_false(reading_slot_put(&slot, &r));
-	zassert_ok(k_msgq_get(&slot, &out, K_NO_WAIT));
+	zassert_false(reading_queue_put(&queue, &r));
+	zassert_ok(k_msgq_get(&queue, &out, K_NO_WAIT));
+	zassert_equal(out.uptime_ms, 20000);
 	zassert_equal(out.temperature_c, 21.0f);
 }
 
-ZTEST(reading_slot, test_newer_reading_replaces_unpublished_one)
+ZTEST(reading_queue, test_readings_come_out_oldest_first)
 {
-	const struct sensor_reading older = {.temperature_c = 21.0f};
-	const struct sensor_reading newer = {.temperature_c = 22.0f};
 	struct sensor_reading out;
 
-	zassert_false(reading_slot_put(&slot, &older));
-	zassert_true(reading_slot_put(&slot, &newer));
+	put_n(QUEUE_LEN);
+	for (int i = 0; i < QUEUE_LEN; i++) {
+		zassert_ok(k_msgq_get(&queue, &out, K_NO_WAIT));
+		zassert_equal(out.uptime_ms, i);
+	}
+}
 
-	zassert_ok(k_msgq_get(&slot, &out, K_NO_WAIT));
-	zassert_equal(out.temperature_c, 22.0f);
-	zassert_equal(k_msgq_num_used_get(&slot), 0);
+ZTEST(reading_queue, test_full_queue_drops_the_oldest)
+{
+	const struct sensor_reading newest = {.uptime_ms = 100};
+	struct sensor_reading out;
+
+	put_n(QUEUE_LEN);
+	zassert_true(reading_queue_put(&queue, &newest));
+	zassert_equal(k_msgq_num_used_get(&queue), QUEUE_LEN);
+
+	zassert_ok(k_msgq_get(&queue, &out, K_NO_WAIT));
+	zassert_equal(out.uptime_ms, 1);
+	zassert_ok(k_msgq_get(&queue, &out, K_NO_WAIT));
+	zassert_equal(out.uptime_ms, 2);
+	zassert_ok(k_msgq_get(&queue, &out, K_NO_WAIT));
+	zassert_equal(out.uptime_ms, 100);
 }

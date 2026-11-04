@@ -14,8 +14,10 @@ target_sources(app PRIVATE
   src/test_payload.c
   src/test_reading.c
   src/test_recovery.c
+  src/test_timesync.c
   ${APP_SRC}/lux.c
   ${APP_SRC}/payload.c
   ${APP_SRC}/reading.c
   ${APP_SRC}/recovery.c
+  ${APP_SRC}/timesync.c
 )

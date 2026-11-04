@@ -16,6 +16,26 @@ config GHANODE_SAMPLE_INTERVAL_MS
 	int "Sample period in milliseconds"
 	default 20000
 
+config GHANODE_READING_QUEUE_LEN
+	int "Readings kept while the broker cannot be reached"
+	range 1 1024
+	default 180
+	help
+	  180 readings at the default 20 s period cover one hour (about 4 KB of
+	  RAM). When the queue is full the oldest reading is dropped.
+
+config GHANODE_SNTP_SERVER
+	string "SNTP server, host name or IPv4 address, optionally with :port"
+	default "pool.ntp.org"
+
+config GHANODE_SNTP_RESYNC_S
+	int "Seconds between SNTP queries once synced"
+	default 3600
+
+config GHANODE_SNTP_RETRY_S
+	int "Seconds before retrying a failed SNTP query"
+	default 60
+
 config GHANODE_WIFI_COUNTRY
 	string "Wi-Fi regulatory country code (ISO 3166-1 alpha-2)"
 	default "DK"

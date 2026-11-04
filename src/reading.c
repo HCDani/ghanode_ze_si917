@@ -4,11 +4,15 @@
 
 #include "reading.h"
 
-bool reading_slot_put(struct k_msgq *slot, const struct sensor_reading *reading)
+bool reading_queue_put(struct k_msgq *queue, const struct sensor_reading *reading)
 {
 	struct sensor_reading discarded;
-	const bool dropped = (k_msgq_get(slot, &discarded, K_NO_WAIT) == 0);
+	bool dropped = false;
 
-	(void)k_msgq_put(slot, reading, K_NO_WAIT);
+	while (k_msgq_put(queue, reading, K_NO_WAIT) != 0) {
+		if (k_msgq_get(queue, &discarded, K_NO_WAIT) == 0) {
+			dropped = true;
+		}
+	}
 	return dropped;
 }

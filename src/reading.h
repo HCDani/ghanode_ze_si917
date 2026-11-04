@@ -6,20 +6,23 @@
 #define GHANODE_READING_H_
 
 #include <stdbool.h>
+#include <stdint.h>
 
 #include <zephyr/kernel.h>
 
 struct sensor_reading {
+	/* k_uptime_get() when the sample was taken; turned into UTC at publish time. */
+	int64_t uptime_ms;
 	float temperature_c;
 	float humidity_pct;
 	int light_lux;
 };
 
 /*
- * Puts a reading into a one-slot queue. A reading still in the slot has not
- * been published and is dropped in favour of the new one. Returns true when
- * that happened. Only one thread may put.
+ * Puts a reading into the queue. When the queue is full the oldest unpublished
+ * reading is dropped to make room. Returns true when that happened. Only one
+ * thread may put.
  */
-bool reading_slot_put(struct k_msgq *slot, const struct sensor_reading *reading);
+bool reading_queue_put(struct k_msgq *queue, const struct sensor_reading *reading);
 
 #endif /* GHANODE_READING_H_ */

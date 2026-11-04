@@ -2,21 +2,24 @@
 
 Zephyr port of [ghanode_si917](https://github.com/HCDani/ghanode_si917), the
 FreeRTOS/WiSeConnect sensor node for the **SiWx917** (BRD4338A on a BRD4002A
-mainboard). Same payload and the same GHA ingest contract; the RTOS, drivers
-and network stack are now Zephyr's. Recovery differs where the old NWP MQTT
+mainboard). Same payload keys as the GHA pipeline of the bachelor project used
+(that pipeline is discontinued), plus a timestamp; the RTOS, drivers and
+network stack are now Zephyr's. Recovery differs where the old NWP MQTT
 client and the 30-reading backlog did.
 
 The node joins a WPA2/WPA3 network as a Wi-Fi station over DHCP, samples the
 on-board Si7021 and a GL5528 photoresistor every 20 s, and publishes JSON to
-`ghanode/sensor` on an MQTT broker. The payload has no timestamp, so only the
-latest unpublished reading is kept. Older ones are dropped, and an outage shows
-up as a gap.
+`ghanode/sensor` on an MQTT broker. Each reading carries the UTC time it was
+sampled, from SNTP, so up to an hour of readings is queued through an outage
+and published afterwards with their own times.
 
 ```
-{"Sensor ID": "8C65A319AC98", "temperature":23.4, "humidity": 47, "light": 767}
+{"Sensor ID": "8C65A319AC98", "temperature":23.4, "humidity": 47, "light": 767, "timestamp": "2026-11-04T12:55:00Z"}
 ```
 
-`Sensor ID` is the STA MAC, which is also the MQTT client ID.
+`Sensor ID` is the STA MAC, which is also the MQTT client ID. `timestamp` is
+the sample time in UTC, whole seconds. Until the first SNTP answer it is left
+out, and a subscriber has to time the reading on arrival.
 
 ## What changed from the FreeRTOS version
 
@@ -35,10 +38,13 @@ up as a gap.
 Behavioural differences:
 
 * **QoS 1 instead of QoS 0.** A reading leaves the node only once the broker's
-  PUBACK arrives. A reading that is never acknowledged is dropped, not replayed.
-* **No reading backlog.** The FreeRTOS node buffered 30 readings (10 minutes)
-  and flushed them after a reconnect. Those readings were stamped with the
-  reconnect time, so this node keeps one and drops the rest.
+  PUBACK arrives. One that is not acknowledged is sent again after the
+  reconnect, so a subscriber can receive it twice with the same `Sensor ID`
+  and `timestamp`.
+* **Timestamped backlog.** The FreeRTOS node buffered 30 readings (10 minutes)
+  and flushed them after a reconnect, where the GHA pipeline stamped them all
+  with the reconnect time. This node queues 180 (one hour) and stamps each with its
+  sample time from SNTP.
 * **Sampling starts at boot**, not after the first Wi-Fi join. Zephyr boots the
   NWP at `POST_KERNEL`, before `main()` touches any ULP peripheral, so the
   bring-up order constraint is met without waiting for Wi-Fi.
@@ -63,8 +69,18 @@ the first sample and then hourly (`Stack unused at high-water: …`). This SoC
 does not support `CONFIG_HW_STACK_PROTECTION`, so that log is the overflow
 check.
 
-* **One unpublished reading.** A new sample replaces the one still waiting to be
-  sent. The log says `Dropped an unpublished reading`.
+* **Reading queue.** `CONFIG_GHANODE_READING_QUEUE_LEN` readings (180, one
+  hour) wait for the broker. When the queue is full the oldest is dropped and
+  the log says `Reading queue full, dropped the oldest reading`. The queue is
+  in RAM, so an MCU reset loses it.
+* **Time.** Each reading stores the uptime it was sampled at. The network
+  thread queries SNTP before the first MQTT connect, retries every 60 s until
+  it gets an answer, and then resyncs hourly, logging how far each resync
+  moved the clock. At publish time the latest sync turns the uptime into UTC,
+  so readings taken before the first sync get the right time too.
+* **No time, no backlog.** Before the first SNTP answer, a reading older than
+  one sample period is dropped instead of sent (`No SNTP time, dropped a
+  reading taken … s ago`), because a subscriber could only time it on arrival.
 * **Events.** `net_mgmt` callbacks run on the net_mgmt thread and only post
   `k_event` bits (scan done, connected, DHCP bound, Wi-Fi down).
 * **One publish in flight.** The next reading is formatted only after the
@@ -74,7 +90,8 @@ check.
   up to 60 s. The MQTT wait ends early if Wi-Fi is lost.
 * **Dead sessions.** Three publish errors in a row, no PUBACK within 10 s, or
   a PINGREQ unanswered for a whole keep-alive period (60 s) end the session
-  even without a disconnect event. The unsent reading is dropped.
+  even without a disconnect event. The unsent reading is kept for the next
+  session.
 * **Recovery ladder.** A dead session first restarts Wi-Fi. If no publish gets
   through before the next failure, or three connects in a row fail after the
   restart, the MCU resets.
@@ -121,6 +138,10 @@ copy secret_example.h secret.h
 | `CONFIG_GHANODE_MQTT_BROKER_PORT` | `1883` |
 | `CONFIG_GHANODE_MQTT_TOPIC` | `ghanode/sensor` |
 | `CONFIG_GHANODE_SAMPLE_INTERVAL_MS` | `20000` |
+| `CONFIG_GHANODE_READING_QUEUE_LEN` | `180` |
+| `CONFIG_GHANODE_SNTP_SERVER` | `pool.ntp.org` (host name via the DHCP DNS server, or an IPv4 address) |
+| `CONFIG_GHANODE_SNTP_RESYNC_S` | `3600` |
+| `CONFIG_GHANODE_SNTP_RETRY_S` | `60` |
 | `CONFIG_GHANODE_WIFI_COUNTRY` | `DK` |
 
 ## Build and flash
@@ -166,9 +187,10 @@ suites that run on `native_sim` (Linux or WSL):
 
 | Suite | Covers |
 | --- | --- |
-| `payload` | The exact JSON the GHA pipeline parses, humidity rounding, buffer overflow |
+| `payload` | The exact JSON, with and without `timestamp`, UTC calendar edges, humidity rounding, buffer overflow |
 | `recovery` | The recovery ladder: when a failure restarts Wi-Fi and when it resets the MCU |
-| `reading_slot` | A new sample replaces the unpublished one |
+| `reading_queue` | Oldest-first order; a full queue drops the oldest reading |
+| `timesync` | SNTP answer to UTC: fractions, readings before and after the sync, resync step, implausible answers |
 | `lux` | LDR voltage to lux: R10 point, full scale, clamping |
 | `backoff` | 5 s doubling to the 60 s cap |
 
@@ -188,9 +210,11 @@ every push and pull request (`.github/workflows/ci.yml`). The CI build uses
 | `src/sensors.c` | Si7021 power gating and probe, temperature/humidity, light ADC |
 | `src/wifi.c` | Scan, AP selection, join, DHCP, link-loss detection, diagnostics |
 | `src/mqtt_link.c` | MQTT connect, publishing, dead-session detection, acting on the recovery ladder |
+| `src/sntp_sync.c` | SNTP queries and their schedule |
+| `src/timesync.c` | Uptime to UTC from the latest SNTP answer (no hardware) |
 | `src/recovery.c` | Recovery ladder decisions (no hardware) |
-| `src/payload.c` | JSON payload formatting (no hardware) |
-| `src/reading.c` | One-slot reading queue (no hardware) |
+| `src/payload.c` | JSON payload formatting, UTC timestamp (no hardware) |
+| `src/reading.c` | Drop-oldest reading queue (no hardware) |
 | `src/lux.c` | LDR voltage to lux (no hardware) |
 | `src/backoff.h` | Retry delay doubling |
 | `tests/unit/` | ztest suites for the files above, on `native_sim` |
@@ -204,14 +228,18 @@ On a BRD4338A the node joined a WPA3 network, received a DHCP lease, and
 published the JSON above. A beacon loss kept sampling and rejoined after the
 access point changed channel. A broker that stopped answering produced a 10 s
 publish timeout, a Wi-Fi restart, three connect timeouts, and one MCU reset,
-after which publishing resumed. The firmware on the board keeps only the latest
-unpublished reading.
+after which publishing resumed. Those runs predate SNTP, when the node kept only
+the latest unpublished reading; the timestamped queue has not yet been run on
+the board.
 
 ## Known limitations
 
-* **No timestamp in the payload.** A reading sent just after a reconnect is
-  stamped then, so it can be up to one sample period late. Readings that could
-  not be published are dropped instead of replayed.
+* **Duplicates are possible.** A reading re-sent after a lost PUBACK arrives
+  twice; `Sensor ID` plus `timestamp` identifies it.
+* **No SNTP, no backlog.** If the SNTP server never answers, the node behaves
+  like before: only fresh readings are published, the rest are dropped.
+* **An SNTP query blocks the network thread** for up to 3 s (plus the DNS
+  lookup), hourly. Publishing and keep-alives wait meanwhile.
 * **Plain MQTT on 1883.** TLS isn't wired up.
 * **Lux is uncalibrated**; adjust `LDR_R10_OHMS` in `src/lux.c` from a lux
   meter reading near 2,000 lux.

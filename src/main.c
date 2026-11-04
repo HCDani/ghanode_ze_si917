@@ -25,10 +25,8 @@ LOG_MODULE_REGISTER(main, LOG_LEVEL_INF);
 /* Stack high-water marks are logged after the first sample, then hourly. */
 #define STACK_REPORT_EVERY_N_SAMPLES (3600000U / CONFIG_GHANODE_SAMPLE_INTERVAL_MS)
 
-/* One slot. The payload has no timestamp, so a backlog would be stamped with the
- * reconnect time. A newer sample replaces the unpublished one.
- */
-K_MSGQ_DEFINE(reading_queue, sizeof(struct sensor_reading), 1, 4);
+/* Holds readings through a broker or Wi-Fi outage. When full, the oldest is dropped. */
+K_MSGQ_DEFINE(reading_queue, sizeof(struct sensor_reading), CONFIG_GHANODE_READING_QUEUE_LEN, 8);
 K_EVENT_DEFINE(net_events);
 
 /* Written by the fatal error handler for a debugger to read. */
@@ -46,8 +44,8 @@ K_THREAD_DEFINE(net_tid, NET_STACK_SIZE, net_thread_fn, NULL, NULL, NULL, NET_PR
 /* Only the sensor thread puts. */
 static void enqueue_reading(const struct sensor_reading *reading)
 {
-	if (reading_slot_put(&reading_queue, reading)) {
-		LOG_INF("Dropped an unpublished reading");
+	if (reading_queue_put(&reading_queue, reading)) {
+		LOG_INF("Reading queue full, dropped the oldest reading");
 	}
 }
 
@@ -76,7 +74,7 @@ static void sensor_thread_fn(void *p1, void *p2, void *p3)
 	ARG_UNUSED(p3);
 
 	while (true) {
-		struct sensor_reading reading = {0};
+		struct sensor_reading reading = {.uptime_ms = k_uptime_get()};
 		float volts = 0.0f;
 		int ret;
 
@@ -95,8 +93,8 @@ static void sensor_thread_fn(void *p1, void *p2, void *p3)
 			enqueue_reading(&reading);
 		} else {
 			/*
-			 * A failed measurement would leave 0 C / 0 %RH, which passes
-			 * the pipeline's numeric check as a real reading.
+			 * A failed measurement would leave 0 C / 0 %RH, which looks
+			 * like a real reading.
 			 */
 			LOG_ERR("Si7021: measurement failed: %d, reading skipped", ret);
 		}
