@@ -10,8 +10,9 @@ client and the 30-reading backlog did.
 The node joins a WPA2/WPA3 network as a Wi-Fi station over DHCP, samples the
 on-board Si7021 and a GL5528 photoresistor every 20 s, and publishes JSON to
 `ghanode/sensor` on an MQTT broker. Each reading carries the UTC time it was
-sampled, from SNTP, so up to an hour of readings is queued through an outage
-and published afterwards with their own times.
+sampled, from SNTP, so a short outage such as a Wi-Fi handover or a broker
+restart (up to ten minutes of readings) is bridged by a queue and published
+afterwards with the right times.
 
 ```
 {"Sensor ID": "8C65A319AC98", "temperature":23.4, "humidity": 47, "light": 767, "timestamp": "2026-11-04T12:55:00Z"}
@@ -43,8 +44,8 @@ Behavioural differences:
   and `timestamp`.
 * **Timestamped backlog.** The FreeRTOS node buffered 30 readings (10 minutes)
   and flushed them after a reconnect, where the GHA pipeline stamped them all
-  with the reconnect time. This node queues 180 (one hour) and stamps each with its
-  sample time from SNTP.
+  with the reconnect time. This node also queues 30 (10 minutes), but stamps
+  each with its sample time from SNTP.
 * **Sampling starts at boot**, not after the first Wi-Fi join. Zephyr boots the
   NWP at `POST_KERNEL`, before `main()` touches any ULP peripheral, so the
   bring-up order constraint is met without waiting for Wi-Fi.
@@ -69,10 +70,12 @@ the first sample and then hourly (`Stack unused at high-water: …`). This SoC
 does not support `CONFIG_HW_STACK_PROTECTION`, so that log is the overflow
 check.
 
-* **Reading queue.** `CONFIG_GHANODE_READING_QUEUE_LEN` readings (180, one
-  hour) wait for the broker. When the queue is full the oldest is dropped and
-  the log says `Reading queue full, dropped the oldest reading`. The queue is
-  in RAM, so an MCU reset loses it.
+* **Reading queue.** `CONFIG_GHANODE_READING_QUEUE_LEN` readings (30, ten
+  minutes) wait for the broker. It is there to bridge short outages, not hours.
+  When the queue is full the oldest is dropped and the log says `Reading queue
+  full, dropped the oldest reading`. The queue is in RAM, so an MCU reset loses
+  it; the recovery ladder therefore never resets within ten minutes of the last
+  acknowledged publish.
 * **Time.** Each reading stores the uptime it was sampled at. The network
   thread queries SNTP before the first MQTT connect, retries every 60 s until
   it gets an answer, and then resyncs hourly, logging how far each resync
@@ -85,7 +88,10 @@ check.
   `k_event` bits (scan done, connected, DHCP bound, Wi-Fi down).
 * **One publish in flight.** The next reading is formatted only after the
   previous one's PUBACK. If that acknowledgement never arrives, the reading is
-  dropped.
+  sent again in the next session.
+* **SNTP on reconnect.** If there has been no sync yet when the broker accepts
+  a connect, SNTP is queried at once instead of waiting for the next retry, so
+  the queued readings are stamped instead of dropped.
 * **Backoff.** Failed Wi-Fi joins and MQTT connects retry after 5 s, doubling
   up to 60 s. The MQTT wait ends early if Wi-Fi is lost.
 * **Dead sessions.** Three publish errors in a row, no PUBACK within 10 s, or
@@ -94,7 +100,11 @@ check.
   session.
 * **Recovery ladder.** A dead session first restarts Wi-Fi. If no publish gets
   through before the next failure, or three connects in a row fail after the
-  restart, the MCU resets.
+  restart or a rejoin, the MCU resets, but only once ten minutes have passed
+  without an acknowledged publish (`RECOVERY_RESET_GRACE_MS`). Until then the
+  node keeps retrying with backoff, so the queue survives an outage that the
+  restart did not fix by itself, such as a broker that is unreachable for a few
+  minutes after the access point comes back.
 * **Fatal errors.** `k_sys_fatal_error_handler` stores the thread name in
   `fatal_thread_name` for a debugger and halts. It does not catch a stack
   overflow, because this SoC provides no stack guard.
@@ -130,6 +140,7 @@ copy secret_example.h secret.h
 | `SECRET_WIFI_DHCP_HOSTNAME` | DHCP option 12 hostname, 30 characters or fewer |
 | `SECRET_MQTT_BROKER_ADDR` | Broker IPv4 address |
 | `SECRET_MQTT_USERNAME` / `SECRET_MQTT_PASSWORD` | MQTT login |
+| `SECRET_SNTP_SERVER` | SNTP server, IPv4 address or a host name resolved via the DHCP DNS server |
 
 ## Configuration (`prj.conf` or `menuconfig`)
 
@@ -138,8 +149,7 @@ copy secret_example.h secret.h
 | `CONFIG_GHANODE_MQTT_BROKER_PORT` | `1883` |
 | `CONFIG_GHANODE_MQTT_TOPIC` | `ghanode/sensor` |
 | `CONFIG_GHANODE_SAMPLE_INTERVAL_MS` | `20000` |
-| `CONFIG_GHANODE_READING_QUEUE_LEN` | `180` |
-| `CONFIG_GHANODE_SNTP_SERVER` | `pool.ntp.org` (host name via the DHCP DNS server, or an IPv4 address) |
+| `CONFIG_GHANODE_READING_QUEUE_LEN` | `30` |
 | `CONFIG_GHANODE_SNTP_RESYNC_S` | `3600` |
 | `CONFIG_GHANODE_SNTP_RETRY_S` | `60` |
 | `CONFIG_GHANODE_WIFI_COUNTRY` | `DK` |
@@ -188,7 +198,7 @@ suites that run on `native_sim` (Linux or WSL):
 | Suite | Covers |
 | --- | --- |
 | `payload` | The exact JSON, with and without `timestamp`, UTC calendar edges, humidity rounding, buffer overflow |
-| `recovery` | The recovery ladder: when a failure restarts Wi-Fi and when it resets the MCU |
+| `recovery` | The recovery ladder: when a failure restarts Wi-Fi, when it resets the MCU, and the ten-minute grace before a reset |
 | `reading_queue` | Oldest-first order; a full queue drops the oldest reading |
 | `timesync` | SNTP answer to UTC: fractions, readings before and after the sync, resync step, implausible answers |
 | `lux` | LDR voltage to lux: R10 point, full scale, clamping |
@@ -229,8 +239,27 @@ published the JSON above. A beacon loss kept sampling and rejoined after the
 access point changed channel. A broker that stopped answering produced a 10 s
 publish timeout, a Wi-Fi restart, three connect timeouts, and one MCU reset,
 after which publishing resumed. Those runs predate SNTP, when the node kept only
-the latest unpublished reading; the timestamped queue has not yet been run on
-the board.
+the latest unpublished reading.
+
+With SNTP (5 Nov 2026): a broker stopped for five minutes produced only backoff,
+and all 19 readings from the outage were published after the restart, oldest
+first, with timestamps 20 s apart. An access point switched off for five minutes
+was rejoined, but the broker stayed unreachable for minutes longer; three failed
+connects then reset the MCU and emptied the queue. That run led to the
+ten-minute grace before a reset. With the grace, a broker that hung for about
+seven minutes produced one Wi-Fi restart and eight connect timeouts but no
+reset, and all 20 readings from the outage were then published in order. An uplink
+outage of about ten minutes behind the access point (9 Nov) ended, as designed,
+in a reset ten minutes after the last acknowledged publish, which lost the queue;
+the node reconnected about 50 s after the reboot once the route was back. With
+the access point itself off for five minutes (9 Nov), the node kept scanning,
+rejoined on the access point's new channel, and published all 16 readings from
+the outage with no reset. A broker hung for longer than the grace (9 Nov)
+caused no reset until ten minutes after the last acknowledged publish; the node
+then rebooted, losing the queue, and resumed publishing within 16 s. With an
+SNTP server that does not answer, payloads went out without a timestamp, and
+after a three-minute broker stop the nine queued readings were dropped and only
+the newest was published.
 
 ## Known limitations
 

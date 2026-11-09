@@ -16,6 +16,12 @@
  */
 void sntp_sync_if_due(void);
 
+/*
+ * Queries the SNTP server at once, ignoring the retry delay, if there has been
+ * no sync yet. For when the network has just come back. Network thread only.
+ */
+void sntp_sync_if_unsynced(void);
+
 /* True once any SNTP query has succeeded. Network thread only. */
 bool sntp_synced(void);
 

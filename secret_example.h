@@ -27,6 +27,11 @@
 #define SECRET_MQTT_BROKER_ADDR "192.168.6.1"
 #endif
 
+/* SNTP server, host name or IPv4 address, optionally with :port */
+#ifndef SECRET_SNTP_SERVER
+#define SECRET_SNTP_SERVER "192.168.6.1"
+#endif
+
 /* MQTT username */
 #ifndef SECRET_MQTT_USERNAME
 #define SECRET_MQTT_USERNAME "your-mqtt-username"

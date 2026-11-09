@@ -328,7 +328,9 @@ static void apply_recovery(enum recovery_action action, const char *reason)
 		k_event_post(&net_events, NET_EVT_WIFI_DOWN);
 		break;
 	case RECOVERY_RESET_MCU:
-		LOG_ERR("%s again after a Wi-Fi restart, resetting the MCU", reason);
+		LOG_ERR("%s after a Wi-Fi restart and nothing published for %u min, "
+			"resetting the MCU",
+			reason, RECOVERY_RESET_GRACE_MS / 60000U);
 		LOG_PANIC();
 		sys_reboot(SYS_REBOOT_COLD);
 		break;
@@ -343,7 +345,7 @@ void network_loop(void)
 	uint32_t retry_delay_ms = MQTT_RETRY_DELAY_MIN_MS;
 	int ret;
 
-	recovery_init(&recovery);
+	recovery_init(&recovery, k_uptime_get());
 
 	wifi_join();
 	wifi_log_diagnostics();
@@ -366,8 +368,15 @@ void network_loop(void)
 
 			retry_delay_ms = MQTT_RETRY_DELAY_MIN_MS;
 			recovery_connected(&recovery);
+			/*
+			 * Without a sync the publish loop drops every queued reading
+			 * older than one sample period, so a pending retry must not
+			 * wait out its delay now that the network is back.
+			 */
+			sntp_sync_if_unsynced();
 			ret = publish_until_disconnected(&published);
-			apply_recovery(recovery_session_ended(&recovery, published, ret < 0),
+			apply_recovery(recovery_session_ended(&recovery, published, ret < 0,
+							      k_uptime_get()),
 				       "MQTT session dead without a disconnect");
 			continue;
 		}
@@ -376,7 +385,8 @@ void network_loop(void)
 			continue;
 		}
 
-		apply_recovery(recovery_connect_failed(&recovery), "MQTT connect keeps failing");
+		apply_recovery(recovery_connect_failed(&recovery, k_uptime_get()),
+			       "MQTT connect keeps failing");
 		LOG_ERR("MQTT not connected, retrying in %u s", retry_delay_ms / 1000U);
 		/* Wakes early if Wi-Fi is lost, so the rejoin is not held up by the backoff. */
 		(void)k_event_wait(&net_events, NET_EVT_WIFI_DOWN, false, K_MSEC(retry_delay_ms));
