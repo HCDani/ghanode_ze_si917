@@ -12,6 +12,7 @@
 #include <zephyr/net/mqtt.h>
 #include <zephyr/net/net_ip.h>
 #include <zephyr/net/socket.h>
+#include <zephyr/net/tls_credentials.h>
 #include <zephyr/sys/reboot.h>
 
 #include "app.h"
@@ -59,6 +60,17 @@ static struct net_sockaddr_storage broker;
 static struct mqtt_utf8 username = MQTT_UTF8_LITERAL(SECRET_MQTT_USERNAME);
 static struct mqtt_utf8 password = MQTT_UTF8_LITERAL(SECRET_MQTT_PASSWORD);
 
+#if defined(CONFIG_GHANODE_MQTT_TLS)
+#define CA_CERT_TAG 1
+
+/* mbed TLS parses PEM only with the terminating NUL counted in the length. */
+static const char ca_cert[] = {
+#include "isrg_root_x1.pem.inc"
+	'\0'
+};
+static const sec_tag_t sec_tags[] = {CA_CERT_TAG};
+#endif
+
 /* Session state, written by mqtt_evt_handler(). */
 static bool connack_received;
 static bool mqtt_connected;
@@ -103,16 +115,31 @@ static void mqtt_setup(void)
 		LOG_ERR("Bad broker address %s", SECRET_MQTT_BROKER_ADDR);
 	}
 
+#if defined(CONFIG_GHANODE_MQTT_TLS)
+	int ret = tls_credential_add(CA_CERT_TAG, TLS_CREDENTIAL_CA_CERTIFICATE, ca_cert,
+				     sizeof(ca_cert));
+
+	if (ret < 0) {
+		LOG_ERR("Failed to add the CA certificate: %d", ret);
+	}
+#endif
+
 	/* The broker drops a session when another client connects with the same ID. */
 	wifi_mac_string(sensor_id, sizeof(sensor_id));
-	LOG_INF("STA mac=%s (sensor id), broker %s:%d", sensor_id,
-		SECRET_MQTT_BROKER_ADDR, CONFIG_GHANODE_MQTT_BROKER_PORT);
+	LOG_INF("STA mac=%s (sensor id), broker %s:%d%s", sensor_id, SECRET_MQTT_BROKER_ADDR,
+		CONFIG_GHANODE_MQTT_BROKER_PORT,
+		IS_ENABLED(CONFIG_GHANODE_MQTT_TLS) ? " over TLS as " SECRET_MQTT_TLS_HOSTNAME
+						    : "");
 }
 
 static int poll_socket(int timeout_ms)
 {
 	struct zsock_pollfd fds = {
+#if defined(CONFIG_GHANODE_MQTT_TLS)
+		.fd = client.transport.tls.sock,
+#else
 		.fd = client.transport.tcp.sock,
+#endif
 		.events = ZSOCK_POLLIN,
 	};
 
@@ -145,7 +172,16 @@ static int mqtt_connect_and_wait(void)
 	client.rx_buf_size = sizeof(rx_buf);
 	client.tx_buf = tx_buf;
 	client.tx_buf_size = sizeof(tx_buf);
+#if defined(CONFIG_GHANODE_MQTT_TLS)
+	/* The broker is dialled by address, so the certificate is matched to this name. */
+	client.transport.type = MQTT_TRANSPORT_SECURE;
+	client.transport.tls.config.peer_verify = TLS_PEER_VERIFY_REQUIRED;
+	client.transport.tls.config.sec_tag_list = sec_tags;
+	client.transport.tls.config.sec_tag_count = ARRAY_SIZE(sec_tags);
+	client.transport.tls.config.hostname = SECRET_MQTT_TLS_HOSTNAME;
+#else
 	client.transport.type = MQTT_TRANSPORT_NON_SECURE;
+#endif
 
 	connack_received = false;
 	mqtt_connected = false;

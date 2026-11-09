@@ -16,7 +16,12 @@
 
 LOG_MODULE_REGISTER(main, LOG_LEVEL_INF);
 
+/* The TLS handshake, certificate check included, runs on the network thread's stack. */
+#if defined(CONFIG_GHANODE_MQTT_TLS)
+#define NET_STACK_SIZE    8192
+#else
 #define NET_STACK_SIZE    4096
+#endif
 #define SENSOR_STACK_SIZE 2048
 /* The sensor thread outranks the network thread so a slow reconnect never delays a sample. */
 #define SENSOR_PRIORITY   K_PRIO_PREEMPT(10)

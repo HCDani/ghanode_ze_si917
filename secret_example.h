@@ -27,6 +27,11 @@
 #define SECRET_MQTT_BROKER_ADDR "192.168.6.1"
 #endif
 
+/* Name on the broker's TLS certificate, checked instead of the address */
+#ifndef SECRET_MQTT_TLS_HOSTNAME
+#define SECRET_MQTT_TLS_HOSTNAME "broker.example.com"
+#endif
+
 /* SNTP server, host name or IPv4 address, optionally with :port */
 #ifndef SECRET_SNTP_SERVER
 #define SECRET_SNTP_SERVER "192.168.6.1"

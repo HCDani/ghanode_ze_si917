@@ -20,3 +20,9 @@ target_sources(app PRIVATE
 
 # secret.h (gitignored) lives next to this file.
 target_include_directories(app PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+
+if(CONFIG_GHANODE_MQTT_TLS)
+  set(gen_dir ${ZEPHYR_BINARY_DIR}/include/generated)
+  generate_inc_file_for_target(app ${CMAKE_CURRENT_SOURCE_DIR}/certs/isrg_root_x1.pem
+                               ${gen_dir}/isrg_root_x1.pem.inc)
+endif()

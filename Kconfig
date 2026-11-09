@@ -4,8 +4,19 @@ mainmenu "ghanode SiWx917 sensor node"
 
 menu "ghanode"
 
+config GHANODE_MQTT_TLS
+	bool "MQTT over TLS"
+	default y
+	depends on MQTT_LIB_TLS
+	help
+	  The broker must present a certificate for SECRET_MQTT_TLS_HOSTNAME
+	  that chains to ISRG Root X1 (certs/isrg_root_x1.pem). The node does
+	  not keep a wall clock for mbed TLS, so certificate dates are not
+	  checked. Disable for plain MQTT.
+
 config GHANODE_MQTT_BROKER_PORT
 	int "MQTT broker port"
+	default 8883 if GHANODE_MQTT_TLS
 	default 1883
 
 config GHANODE_MQTT_TOPIC

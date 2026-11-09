@@ -62,7 +62,7 @@ Behavioural differences:
 | Thread | Priority | Stack | Role |
 | --- | --- | --- | --- |
 | `sensor` | `K_PRIO_PREEMPT(10)` | 2048 B | Producer: reads the Si7021 and the ADC, queues a reading every 20 s |
-| `net` | `K_PRIO_PREEMPT(11)` | 4096 B | Wi-Fi bring-up, then consumer: owns MQTT, publishes the queue |
+| `net` | `K_PRIO_PREEMPT(11)` | 8192 B (4096 B without TLS) | Wi-Fi bring-up, then consumer: owns MQTT, publishes the queue |
 | Zephyr net / Wi-Fi driver threads | driver defaults | — | NWP communication, TCP/IP, `net_mgmt` callbacks |
 
 The stack sizes are a first guess. Both threads log their high-water mark after
@@ -84,6 +84,15 @@ check.
 * **No time, no backlog.** Before the first SNTP answer, a reading older than
   one sample period is dropped instead of sent (`No SNTP time, dropped a
   reading taken … s ago`), because a subscriber could only time it on arrival.
+* **TLS.** MQTT runs over TLS 1.2 on port 8883 (`CONFIG_GHANODE_MQTT_TLS`,
+  default on). The node dials the broker by address and checks its
+  certificate against the name in `SECRET_MQTT_TLS_HOSTNAME` and the ISRG
+  Root X1 CA in `certs/isrg_root_x1.pem`, so a Let's Encrypt certificate
+  works without any certificate on the node itself. The handshake runs on the
+  network thread, with mbed TLS's 64 KB heap for the 16 KB receive buffer and
+  the certificate chain. In software it takes about 9 s on the board, so the
+  handshake timeout is raised from 10 s to 30 s. The faster p256-m driver for
+  P-256 failed the key exchange (-0x7f80), so it stays off.
 * **Events.** `net_mgmt` callbacks run on the net_mgmt thread and only post
   `k_event` bits (scan done, connected, DHCP bound, Wi-Fi down).
 * **One publish in flight.** The next reading is formatted only after the
@@ -139,6 +148,7 @@ copy secret_example.h secret.h
 | `SECRET_WIFI_SSID` / `SECRET_WIFI_PASSWORD` | STA credentials |
 | `SECRET_WIFI_DHCP_HOSTNAME` | DHCP option 12 hostname, 30 characters or fewer |
 | `SECRET_MQTT_BROKER_ADDR` | Broker IPv4 address |
+| `SECRET_MQTT_TLS_HOSTNAME` | Name on the broker's TLS certificate, checked instead of the address |
 | `SECRET_MQTT_USERNAME` / `SECRET_MQTT_PASSWORD` | MQTT login |
 | `SECRET_SNTP_SERVER` | SNTP server, IPv4 address or a host name resolved via the DHCP DNS server |
 
@@ -146,7 +156,8 @@ copy secret_example.h secret.h
 
 | Kconfig | Default |
 | --- | --- |
-| `CONFIG_GHANODE_MQTT_BROKER_PORT` | `1883` |
+| `CONFIG_GHANODE_MQTT_TLS` | `y` (plain MQTT when `n`) |
+| `CONFIG_GHANODE_MQTT_BROKER_PORT` | `8883` with TLS, `1883` without |
 | `CONFIG_GHANODE_MQTT_TOPIC` | `ghanode/sensor` |
 | `CONFIG_GHANODE_SAMPLE_INTERVAL_MS` | `20000` |
 | `CONFIG_GHANODE_READING_QUEUE_LEN` | `30` |
@@ -228,6 +239,7 @@ every push and pull request (`.github/workflows/ci.yml`). The CI build uses
 | `src/lux.c` | LDR voltage to lux (no hardware) |
 | `src/backoff.h` | Retry delay doubling |
 | `tests/unit/` | ztest suites for the files above, on `native_sim` |
+| `certs/isrg_root_x1.pem` | CA the broker's certificate must chain to |
 | `boards/siwx917_rb4338a.overlay` | GPIO_25 ADC input, `SENSOR_ENABLE` pin |
 | `Kconfig`, `prj.conf` | App knobs and Zephyr configuration |
 | `west.yml` | Workspace manifest for CI or a fresh checkout |
@@ -269,7 +281,11 @@ the newest was published.
   like before: only fresh readings are published, the rest are dropped.
 * **An SNTP query blocks the network thread** for up to 3 s (plus the DNS
   lookup), hourly. Publishing and keep-alives wait meanwhile.
-* **Plain MQTT on 1883.** TLS isn't wired up.
+* **TLS certificate dates are not checked.** mbed TLS has no wall clock here
+  (the SNTP time is only used for timestamps), so an expired certificate
+  still passes; the signature chain and the host name are checked.
+* **Only ISRG Root X1 is trusted.** A broker certificate from another CA needs
+  its root added to `certs/`.
 * **Lux is uncalibrated**; adjust `LDR_R10_OHMS` in `src/lux.c` from a lux
   meter reading near 2,000 lux.
 * **Humidity is rounded** to whole %RH in the payload.
